@@ -2,6 +2,7 @@ from __future__ import absolute_import, division
 
 import torch.nn as nn
 import cv2
+import torch.nn.functional as F
 import numpy as np
 
 
@@ -88,11 +89,33 @@ def show_image(img, boxes=None, box_fmt='ltwh', colors=None,
 
     return img
 
+def copy_make_border(input, top, bottom, left, right, border_type='constant', value=0):
+    """
+    类似于cv2.copyMakeBorder的功能，实现在输入张量的周围添加指定数量的边界。
+
+    Args:
+        input (torch.Tensor): 输入张量。
+        top (int): 顶部边界的大小。
+        bottom (int): 底部边界的大小。
+        left (int): 左侧边界的大小。
+        right (int): 右侧边界的大小。
+        border_type (str): 边界类型，支持'constant'（常数填充）和'replicate'（复制边界值）。
+        value (int): 当border_type为'constant'时，指定要填充的常数值。
+
+    Returns:
+        torch.Tensor: 填充后的张量。
+    """
+    if border_type == 'constant':
+        return F.pad(input, (left, right, top, bottom), mode='constant', value=value)
+    elif border_type == 'replicate':
+        return F.pad(input, (left, right, top, bottom), mode='replicate')
+    else:
+        raise ValueError("Unsupported border type. Supported types are 'constant' and 'replicate'.")
 
 def crop_and_resize(img, center, size, out_size,
                     border_type=cv2.BORDER_CONSTANT,
                     border_value=(0, 0, 0),
-                    interp=cv2.INTER_LINEAR):
+                    interp=None):
     # convert box to corners (0-indexed)
     size = round(size)
     corners = np.concatenate((
@@ -108,13 +131,21 @@ def crop_and_resize(img, center, size, out_size,
         img = cv2.copyMakeBorder(
             img, npad, npad, npad, npad,
             border_type, value=border_value)
+        # img = img.permute(2, 0, 1).unsqueeze(0) #bs, c, h, w
+        # img = copy_make_border(img, npad, npad, npad, npad, border_type='constant', value=border_value.mean().item()).squeeze(0).permute(1, 2, 0) #H, W, C
 
     # crop image patch
     corners = (corners + npad).astype(int)
-    patch = img[corners[0]:corners[2], corners[1]:corners[3]]
+    patch = img[corners[0]:corners[2], corners[1]:corners[3]] #H, W, C
+
+    H_scale = out_size / patch.shape[0]
+    W_scale = out_size / patch.shape[1]
 
     # resize to out_size
     patch = cv2.resize(patch, (out_size, out_size),
                        interpolation=interp)
+    # patch = F.interpolate(patch.permute(2, 0, 1).unsqueeze(0), size=(out_size, out_size), mode=interp).squeeze(0).permute(1, 2, 0) #H, W, C
 
-    return patch
+    
+
+    return patch, H_scale, W_scale

@@ -3,7 +3,7 @@ from __future__ import absolute_import, division
 import numpy as np
 import cv2
 from torch.utils.data import Dataset
-
+import torch
 
 __all__ = ['Pair']
 
@@ -11,13 +11,36 @@ __all__ = ['Pair']
 class Pair(Dataset):
 
     def __init__(self, seqs, transforms=None,
-                 pairs_per_seq=1):
+                 pairs_per_seq=1, noise=None):
         super(Pair, self).__init__()
         self.seqs = seqs
         self.transforms = transforms
         self.pairs_per_seq = pairs_per_seq
         self.indices = np.random.permutation(len(seqs))
         self.return_meta = getattr(seqs, 'return_meta', False)
+        self.noise = noise
+        self.epsilon = 8 / 255
+    
+    def paste_noise_to_img(self, img, bbox, index, mode='bicubic'):
+        noise_tensor = self.noise[index].unsqueeze(0)
+
+        z_top_left_x =  int(bbox[0])
+        z_top_left_y = int(bbox[1])
+        z_bottom_right_x = int(bbox[0] + bbox[2])
+        z_bottom_right_y = int(bbox[1] + bbox[3])
+
+        H, W, C = img.shape
+        if z_top_left_x < 0 or z_top_left_y < 0 or z_bottom_right_x > W or z_bottom_right_y > H or (z_bottom_right_x - z_top_left_x) <= 0 or (z_bottom_right_y - z_top_left_y) <= 0:
+            return None
+        else:
+            new_noise = torch.nn.functional.interpolate(
+                noise_tensor, size=(z_bottom_right_y - z_top_left_y, z_bottom_right_x - z_top_left_x), mode=mode, align_corners=False)
+            new_noise = new_noise.clamp_(-self.epsilon, self.epsilon).mul(255).squeeze(0).permute(1, 2, 0).to('cpu').numpy() #H, W, C
+            img = img.astype(np.float32)
+            img[z_top_left_y:z_bottom_right_y, z_top_left_x:z_bottom_right_x, :] += new_noise
+            img = np.clip(img, a_min=0, a_max=255)
+            img = img.astype(np.uint8)
+            return img
 
     def __getitem__(self, index):
         index = self.indices[index % len(self.indices)]
@@ -49,11 +72,23 @@ class Pair(Dataset):
         box_z = anno[rand_z]
         box_x = anno[rand_x]
 
-        item = (z, x, box_z, box_x)
+        if self.noise is not None:
+
+            z = self.paste_noise_to_img(z, box_z, index)
+            x = self.paste_noise_to_img(x, box_x, index)
+            if z is None or x is None:
+                index = np.random.choice(len(self))
+                return self.__getitem__(index)
+
+        # z = torch.from_numpy(z)
+        # x = torch.from_numpy(x)
+
+        item = (z, x, box_z, box_x, None, None)
         if self.transforms is not None:
             item = self.transforms(*item)
+            # adap_box_z, adap_box_x = self.transforms(*item)
         
-        return item
+        return item, index, torch.from_numpy(box_z), torch.from_numpy(box_x)
     
     def __len__(self):
         return len(self.indices) * self.pairs_per_seq
